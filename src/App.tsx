@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 import {
   PetWidget,
   codexPetAtlas,
@@ -24,12 +24,13 @@ import "./App.css";
 const PET_JSON_PATH_LS_KEY = "petJsonPath";
 
 /** 1 = atlas 原始格子大小；略小于 1 让桌宠占屏更小。 */
-const PET_DISPLAY_SCALE = 0.72;
+const PET_DISPLAY_SCALE = 0.62;
+
+const petDisplayWidthPx = codexPetAtlas.cellWidth * PET_DISPLAY_SCALE;
+const petDisplayHeightPx = codexPetAtlas.cellHeight * PET_DISPLAY_SCALE;
 
 /** Screen distance before a pointer gesture counts as a drag (not a click). */
 const DRAG_THRESHOLD_PX = 6;
-/** Ignore horizontal sign flips until |dx| from gesture start exceeds this (reduces jitter). */
-const RUN_FLIP_DEADZONE_PX = 10;
 
 /** Random auto-walk delay range (ms). */
 const AUTO_WALK_MIN_MS = 8000;
@@ -45,10 +46,17 @@ export default function App() {
   const hoveringRef = useRef(false);
   const pointerDownRef = useRef(false);
   const isDraggingRef = useRef(false);
-  const movedDistanceRef = useRef(0);
-  const gestureStartRef = useRef<{ sx: number; sy: number } | null>(null);
-  const startDraggingCalledRef = useRef(false);
-  const lastRunAnimRef = useRef<CodexPetAnimationName | null>(null);
+  const lastDirectionRef = useRef<CodexPetAnimationName | null>(null);
+  const dragStartRef = useRef<{
+    mouseX: number;
+    mouseY: number;
+    windowX: number;
+    windowY: number;
+  } | null>(null);
+  const gestureGenerationRef = useRef(0);
+  const sessionActiveRef = useRef(false);
+  const persistEndDragRef = useRef<(() => void) | null>(null);
+  const activeMoveRef = useRef<((ev: PointerEvent) => void) | null>(null);
 
   const autoScheduleTimerRef = useRef<number | null>(null);
   const autoWalkRunTimerRef = useRef<number | null>(null);
@@ -428,41 +436,106 @@ export default function App() {
   const onPetPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
+
+      if (persistEndDragRef.current) {
+        const prevMove = activeMoveRef.current;
+        if (prevMove) {
+          window.removeEventListener("pointermove", prevMove);
+        }
+        window.removeEventListener("pointerup", persistEndDragRef.current);
+        window.removeEventListener("mouseup", persistEndDragRef.current);
+        window.removeEventListener("blur", persistEndDragRef.current);
+        persistEndDragRef.current = null;
+        activeMoveRef.current = null;
+        sessionActiveRef.current = false;
+        pointerDownRef.current = false;
+        dragStartRef.current = null;
+        isDraggingRef.current = false;
+        lastDirectionRef.current = null;
+        gestureGenerationRef.current += 1;
+      }
+
       clearAutoWalkTimers();
+
+      gestureGenerationRef.current += 1;
+      const generation = gestureGenerationRef.current;
 
       pointerDownRef.current = true;
       isDraggingRef.current = false;
-      movedDistanceRef.current = 0;
-      startDraggingCalledRef.current = false;
-      lastRunAnimRef.current = null;
-      gestureStartRef.current = { sx: e.screenX, sy: e.screenY };
+      lastDirectionRef.current = null;
+      dragStartRef.current = null;
+      sessionActiveRef.current = true;
 
-      const start = gestureStartRef.current;
+      void (async () => {
+        try {
+          if (isTauri()) {
+            const appWindow = getCurrentWindow();
+            const outer = await appWindow.outerPosition();
+            const scaleFactor = await appWindow.scaleFactor();
+            const logical = outer.toLogical(scaleFactor);
+            console.log("[deski-drag] pointerdown outerPosition", {
+              physical: { x: outer.x, y: outer.y },
+              scaleFactor,
+              logical: { x: logical.x, y: logical.y },
+              mouse: { x: e.screenX, y: e.screenY },
+            });
+            if (generation !== gestureGenerationRef.current) return;
+            dragStartRef.current = {
+              mouseX: e.screenX,
+              mouseY: e.screenY,
+              windowX: logical.x,
+              windowY: logical.y,
+            };
+          } else {
+            if (generation !== gestureGenerationRef.current) return;
+            dragStartRef.current = {
+              mouseX: e.screenX,
+              mouseY: e.screenY,
+              windowX: 0,
+              windowY: 0,
+            };
+          }
+        } catch {
+          if (generation !== gestureGenerationRef.current) return;
+          dragStartRef.current = {
+            mouseX: e.screenX,
+            mouseY: e.screenY,
+            windowX: 0,
+            windowY: 0,
+          };
+        }
+      })();
 
       const onMove = (ev: PointerEvent) => {
-        if (!start) return;
-        const dx = ev.screenX - start.sx;
-        const dy = ev.screenY - start.sy;
-        const dist = Math.hypot(dx, dy);
-        movedDistanceRef.current = dist;
+        const d = dragStartRef.current;
+        if (!d) return;
 
+        const dx = ev.screenX - d.mouseX;
+        const dy = ev.screenY - d.mouseY;
+        const dist = Math.hypot(dx, dy);
         if (dist < DRAG_THRESHOLD_PX) return;
 
         if (!isDraggingRef.current) {
           isDraggingRef.current = true;
         }
 
-        let run: CodexPetAnimationName;
-        if (!lastRunAnimRef.current) {
-          run = dx >= 0 ? ANIMATIONS.runRight : ANIMATIONS.runLeft;
-        } else if (Math.abs(dx) < RUN_FLIP_DEADZONE_PX) {
-          run = lastRunAnimRef.current;
-        } else {
-          run = dx >= 0 ? ANIMATIONS.runRight : ANIMATIONS.runLeft;
+        const nextX = d.windowX + dx;
+        const nextY = d.windowY + dy;
+        console.log("[deski-drag] pointermove", { dx, dy, nextX, nextY });
+
+        if (isTauri()) {
+          const appWindow = getCurrentWindow();
+          void appWindow
+            .setPosition(new LogicalPosition(nextX, nextY))
+            .catch((err) => {
+              console.error("[deski-drag] setPosition failed", err);
+            });
         }
 
-        if (lastRunAnimRef.current !== run) {
-          lastRunAnimRef.current = run;
+        const run = dx >= 0 ? ANIMATIONS.runRight : ANIMATIONS.runLeft;
+
+        if (lastDirectionRef.current !== run) {
+          lastDirectionRef.current = run;
           petDispatch({
             type: "animation.play",
             animation: run,
@@ -470,28 +543,32 @@ export default function App() {
             source: "user",
           });
         }
-
-        if (isTauri() && !startDraggingCalledRef.current) {
-          startDraggingCalledRef.current = true;
-          void getCurrentWindow().startDragging();
-        }
       };
 
-      const finish = () => {
+      const endDrag = () => {
+        if (!sessionActiveRef.current) return;
+        sessionActiveRef.current = false;
+        persistEndDragRef.current = null;
+        activeMoveRef.current = null;
+
         window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", finish);
+        window.removeEventListener("pointerup", endDrag);
+        window.removeEventListener("mouseup", endDrag);
+        window.removeEventListener("blur", endDrag);
 
-        pointerDownRef.current = false;
-        gestureStartRef.current = null;
-        lastRunAnimRef.current = null;
-        startDraggingCalledRef.current = false;
-
-        const wasDrag = isDraggingRef.current;
+        const hadDragStart = dragStartRef.current !== null;
+        const didDrag = isDraggingRef.current;
+        dragStartRef.current = null;
         isDraggingRef.current = false;
-        movedDistanceRef.current = 0;
+        lastDirectionRef.current = null;
+        pointerDownRef.current = false;
 
-        if (wasDrag) {
+        if (!hadDragStart) {
+          gestureGenerationRef.current += 1;
+          return;
+        }
+
+        if (didDrag) {
           petDispatch({
             type: "animation.set",
             animation: ANIMATIONS.idle,
@@ -510,9 +587,13 @@ export default function App() {
         }
       };
 
+      persistEndDragRef.current = endDrag;
+      activeMoveRef.current = onMove;
+
       window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", finish);
+      window.addEventListener("pointerup", endDrag);
+      window.addEventListener("mouseup", endDrag);
+      window.addEventListener("blur", endDrag);
     },
     [petDispatch, resumeHoverIfHovered, scheduleNextAutoWalk, clearAutoWalkTimers],
   );
@@ -524,13 +605,24 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app-shell" data-pet-root onContextMenu={onContextMenu}>
+    <div
+      className="app"
+      data-pet-root
+      onContextMenu={onContextMenu}
+      style={
+        {
+          "--pet-display-w": `${petDisplayWidthPx}px`,
+          "--pet-display-h": `${petDisplayHeightPx}px`,
+        } as React.CSSProperties
+      }
+    >
       <div
-        className="pet-drag-area"
+        className="pet-stage pet-container"
         onPointerDown={onPetPointerDown}
         onPointerEnter={onPointerEnter}
         onPointerLeave={onPointerLeave}
       >
+        <div className="pet-stage-sizer" aria-hidden />
         {manifest !== null && spritesheetSrc !== null ? (
           <PetWidget<CodexPetAnimationName>
             key={spritesheetSrc}

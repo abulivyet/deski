@@ -8,38 +8,72 @@ html,
 body,
 #root {
   margin: 0;
-  min-height: 100%;
+  padding: 0;
+  border: none;
+  outline: none;
   background: transparent;
+  overflow: hidden;
 }
 
 #root {
-  width: 155px;
-  height: 168px;
-  overflow: visible;
+  width: fit-content;
+  height: fit-content;
 }
 
-.app-shell {
+.app,
+.pet-stage,
+.pet-container,
+.pet-stage-sizer,
+.pet-desk {
+  border: none;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+}
+
+.app {
+  --pet-display-w: 119px;
+  --pet-display-h: 129px;
   display: flex;
-  width: 100%;
-  height: 100%;
+  width: fit-content;
+  height: fit-content;
+}
+
+/* In-flow box: PetWidget is fixed/out of flow; this keeps .pet-stage hit-testing and fit-content sizing. */
+.pet-stage-sizer {
+  flex-shrink: 0;
+  width: var(--pet-display-w);
+  height: var(--pet-display-h);
+  pointer-events: none;
 }
 
 /* Receives mousedown / click; PetWidget is fixed and uses pointer-events: none so events reach here. */
-.pet-drag-area {
-  flex: 1;
-  width: 100%;
-  min-height: 100%;
+.pet-stage {
   position: relative;
+  width: fit-content;
+  height: fit-content;
   cursor: grab;
 }
 
-.pet-drag-area:active {
+.pet-stage:active {
   cursor: grabbing;
 }
 
-/* Let clicks pass through the fixed PetWidget layer to .pet-drag-area. */
+/* Let clicks pass through the fixed PetWidget layer to .pet-stage. */
 .pet-desk {
   pointer-events: none;
+}
+
+/* Overlays: absolute so they never expand the shrink-wrapped layout. */
+.pet-context-menu,
+.pet-name-bubble {
+  position: absolute;
+  z-index: 60;
+  pointer-events: auto;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
 }
 
 .pet-load-placeholder,
@@ -56,6 +90,10 @@ body,
   color: rgba(255, 255, 255, 0.92);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
   pointer-events: none;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
 }
 
 .pet-load-error {
