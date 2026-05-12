@@ -44,6 +44,8 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const hoveringRef = useRef(false);
+  /** One waving per hover session; reset on pointer leave. */
+  const hoverTriggeredRef = useRef(false);
   const pointerDownRef = useRef(false);
   const isDraggingRef = useRef(false);
   const lastDirectionRef = useRef<CodexPetAnimationName | null>(null);
@@ -158,6 +160,7 @@ export default function App() {
       manifestId: manifest.id,
       spritesheetSrcPrefix: spritesheetSrc.slice(0, 64),
     });
+    hoverTriggeredRef.current = false;
     petDispatch({
       type: "state.reset",
       state: {
@@ -219,36 +222,16 @@ export default function App() {
     }, delay);
   }, [petDispatch]);
 
-  const resumeHoverIfHovered = useCallback(() => {
-    if (!hoveringRef.current) return;
-    petDispatch({
-      type: "animation.play",
-      animation: ANIMATIONS.waving,
-      mode: "loop",
-      source: "user",
-    });
-  }, [petDispatch]);
-
   const onPetAction = useCallback(
     (action: PetAction<CodexPetAnimationName>) => {
       petDispatch(action);
       if (action.type !== "animation.complete") return;
       const done = action.animation;
-      if (
-        done &&
-        (done === ANIMATIONS.jumping ||
-          done === ANIMATIONS.failed ||
-          done === ANIMATIONS.review ||
-          done === ANIMATIONS.running ||
-          done === ANIMATIONS.waving)
-      ) {
-        resumeHoverIfHovered();
-      }
       if (done) {
         scheduleNextAutoWalk();
       }
     },
-    [petDispatch, resumeHoverIfHovered, scheduleNextAutoWalk],
+    [petDispatch, scheduleNextAutoWalk],
   );
 
   useEffect(() => {
@@ -269,13 +252,12 @@ export default function App() {
         animation: ANIMATIONS.idle,
         source: "user",
       });
-      resumeHoverIfHovered();
       scheduleNextAutoWalk();
     };
 
     window.addEventListener("pointerdown", onPointerDownCapture, true);
     return () => window.removeEventListener("pointerdown", onPointerDownCapture, true);
-  }, [pet.animation.mode, pet.animation.name, petDispatch, resumeHoverIfHovered, scheduleNextAutoWalk]);
+  }, [pet.animation.mode, pet.animation.name, petDispatch, scheduleNextAutoWalk]);
 
   useEffect(() => {
     if (manifest === null) return;
@@ -410,28 +392,36 @@ export default function App() {
   const onPointerEnter = useCallback(() => {
     hoveringRef.current = true;
     if (pointerDownRef.current) return;
+    if (hoverTriggeredRef.current) return;
     const n = pet.animation.name;
-    if (n === ANIMATIONS.idle || n === ANIMATIONS.waiting) {
-      petDispatch({
-        type: "animation.play",
-        animation: ANIMATIONS.waving,
-        mode: "loop",
-        source: "user",
-      });
-    }
+    if (n !== ANIMATIONS.idle && n !== ANIMATIONS.waiting) return;
+    hoverTriggeredRef.current = true;
+    petDispatch({
+      type: "animation.play",
+      animation: ANIMATIONS.waving,
+      mode: "once",
+      then: ANIMATIONS.idle,
+      source: "user",
+    });
   }, [pet.animation.name, petDispatch]);
 
   const onPointerLeave = useCallback(() => {
     hoveringRef.current = false;
+    hoverTriggeredRef.current = false;
     if (pointerDownRef.current) return;
-    if (pet.animation.name === ANIMATIONS.waving) {
-      petDispatch({
-        type: "animation.set",
-        animation: ANIMATIONS.idle,
-        source: "user",
-      });
-    }
-  }, [pet.animation.name, petDispatch]);
+    if (isDraggingRef.current) return;
+    const { name, mode } = pet.animation;
+    if (name === ANIMATIONS.waiting) return;
+    if (name === ANIMATIONS.jumping && mode === "once") return;
+    if (name === ANIMATIONS.review && mode === "once") return;
+    if (name === ANIMATIONS.failed && mode === "once") return;
+    if (name === ANIMATIONS.running && mode === "once") return;
+    petDispatch({
+      type: "animation.set",
+      animation: ANIMATIONS.idle,
+      source: "user",
+    });
+  }, [pet.animation.name, pet.animation.mode, petDispatch]);
 
   const onPetPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -574,7 +564,6 @@ export default function App() {
             animation: ANIMATIONS.idle,
             source: "user",
           });
-          resumeHoverIfHovered();
           scheduleNextAutoWalk();
         } else {
           petDispatch({
@@ -595,7 +584,7 @@ export default function App() {
       window.addEventListener("mouseup", endDrag);
       window.addEventListener("blur", endDrag);
     },
-    [petDispatch, resumeHoverIfHovered, scheduleNextAutoWalk, clearAutoWalkTimers],
+    [petDispatch, scheduleNextAutoWalk, clearAutoWalkTimers],
   );
 
   const onContextMenu = useCallback((e: React.MouseEvent) => {

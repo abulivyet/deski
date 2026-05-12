@@ -3,6 +3,7 @@ use tauri::{
     menu::{MenuItem, PredefinedMenuItem, Submenu},
     Emitter, Manager, Wry,
 };
+use tauri_plugin_opener::OpenerExt;
 
 /// Native context menu root (submenu so items work on all platforms including macOS).
 struct PetContextMenu(Submenu<Wry>);
@@ -36,6 +37,13 @@ pub fn run() {
             let failed = MenuItem::with_id(app, "failed", "失败", true, None::<&str>)?;
             let sep_before_change = PredefinedMenuItem::separator(app)?;
             let change_pet = MenuItem::with_id(app, "change-pet", "更换宠物", true, None::<&str>)?;
+            let open_petdex = MenuItem::with_id(
+                app,
+                "open-petdex",
+                "Petdex 桌宠图库…",
+                true,
+                None::<&str>,
+            )?;
             let sep_before_quit = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
@@ -51,6 +59,7 @@ pub fn run() {
                     &failed,
                     &sep_before_change,
                     &change_pet,
+                    &open_petdex,
                     &sep_before_quit,
                     &quit,
                 ],
@@ -70,6 +79,11 @@ pub fn run() {
             eprintln!("[Deski] native menu activated: id={id:?}");
             match id {
                 "quit" => std::process::exit(0),
+                "open-petdex" => {
+                    if let Err(e) = app.opener().open_url("https://petdex.crafter.run/zh", None::<&str>) {
+                        eprintln!("[Deski] open Petdex failed: {e}");
+                    }
+                }
                 _ => {
                     let r = app.emit("menu-action", id.to_string());
                     eprintln!("[Deski] emit menu-action (broadcast): {r:?}");
