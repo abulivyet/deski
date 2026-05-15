@@ -25,6 +25,15 @@ import {
   readStoredWindowPosition,
   type LogicalClampBounds,
 } from "./lib/windowPosition";
+import {
+  opacityToMenuKey,
+  readInitialPetOpacity,
+  readStoredAlwaysOnTop,
+  readStoredClickThrough,
+  writeStoredAlwaysOnTop,
+  writeStoredClickThrough,
+  writeStoredPetOpacity,
+} from "./lib/windowSettings";
 import { ANIMATIONS } from "./petAnimations";
 import type { PetManifest } from "./types/pet";
 import "./App.css";
@@ -102,6 +111,7 @@ export default function App() {
   const [spritesheetSrc, setSpritesheetSrc] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [petUserScale, setPetUserScale] = useState(() => readInitialPetUserScale());
+  const [petOpacity, setPetOpacity] = useState(() => readInitialPetOpacity());
 
   const petDisplayScale = PET_DISPLAY_BASE_SCALE * petUserScale;
   const petDisplayWidthPx = codexPetAtlas.cellWidth * petDisplayScale;
@@ -349,7 +359,75 @@ export default function App() {
     void invoke("sync_pet_size_menu_selection", { key }).catch(() => {
       /* ignore */
     });
+    const opacityKey = opacityToMenuKey(petOpacity);
+    void invoke("sync_pet_opacity_menu_selection", { key: opacityKey }).catch(() => {
+      /* ignore */
+    });
+    void (async () => {
+      const win = getCurrentWindow();
+      const alwaysOnTop = readStoredAlwaysOnTop();
+      try {
+        await win.setAlwaysOnTop(alwaysOnTop);
+        await invoke("sync_always_on_top_menu_selection", { enabled: alwaysOnTop });
+        petLog("always-on-top restored", { enabled: alwaysOnTop });
+      } catch (err) {
+        petWarn("always-on-top restore failed", {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      const clickThrough = readStoredClickThrough();
+      try {
+        await win.setIgnoreCursorEvents(clickThrough);
+        await invoke("sync_click_through_menu_selection", { enabled: clickThrough });
+        petLog("click-through restored", { enabled: clickThrough });
+      } catch (err) {
+        petWarn("click-through restore failed", {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时与 Rust 菜单勾选对齐
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    type AlwaysOnTopPayload = { enabled: boolean };
+    void listen<AlwaysOnTopPayload>("window-always-on-top", (ev) => {
+      const p = ev.payload;
+      if (!p || typeof p.enabled !== "boolean") return;
+      writeStoredAlwaysOnTop(p.enabled);
+      petLog("always-on-top saved", { enabled: p.enabled });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    type ClickThroughPayload = { enabled: boolean };
+    void listen<ClickThroughPayload>("window-click-through", (ev) => {
+      const p = ev.payload;
+      if (!p || typeof p.enabled !== "boolean") return;
+      writeStoredClickThrough(p.enabled);
+      petLog("click-through saved", { enabled: p.enabled });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -377,6 +455,30 @@ export default function App() {
       cancelled = true;
       unlisten?.();
       petLog("pet-size: listener removed");
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    type PetOpacityPayload = { key: string; value: number };
+    void listen<PetOpacityPayload>("pet-opacity", (ev) => {
+      const p = ev.payload;
+      if (!p || typeof p.value !== "number") return;
+      setPetOpacity(p.value);
+      writeStoredPetOpacity(p.value);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else {
+        unlisten = fn;
+        petLog("pet-opacity: listener registered");
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      petLog("pet-opacity: listener removed");
     };
   }, []);
 
@@ -765,6 +867,7 @@ export default function App() {
       >
         <div
           className="pet-stage pet-container"
+          style={{ opacity: petOpacity }}
           onPointerDown={onPetPointerDown}
           onPointerEnter={onPointerEnter}
           onPointerLeave={onPointerLeave}
