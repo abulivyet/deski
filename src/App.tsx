@@ -108,11 +108,18 @@ function scaleToMenuKey(scale: number): string {
 /** Screen distance before a pointer gesture counts as a drag (not a click). */
 const DRAG_THRESHOLD_PX = 6;
 
-/** Random auto-walk delay range (ms). */
+/** Random delay before next auto patrol (ms). */
 const AUTO_WALK_MIN_MS = 8000;
 const AUTO_WALK_MAX_MS = 20000;
-/** Auto-walk run duration (ms). */
+/** Non-Tauri fallback: in-place run duration (ms). */
 const AUTO_WALK_RUN_MS = 2000;
+/** Tauri patrol duration (ms). */
+const AUTO_PATROL_MIN_MS = 1800;
+const AUTO_PATROL_MAX_MS = 3200;
+/** Logical px/s along X. */
+const AUTO_PATROL_SPEED_MIN = 60;
+const AUTO_PATROL_SPEED_MAX = 100;
+const AUTO_PATROL_EDGE_MARGIN = 24;
 
 export default function App() {
   const [manifest, setManifest] = useState<PetManifest | null>(null);
@@ -144,7 +151,14 @@ export default function App() {
   const activeMoveRef = useRef<((ev: PointerEvent) => void) | null>(null);
 
   const autoScheduleTimerRef = useRef<number | null>(null);
+  /** Non-Tauri in-place auto-walk timeout. */
   const autoWalkRunTimerRef = useRef<number | null>(null);
+  const autoWalkFrameRef = useRef<number | null>(null);
+  const autoWalkActiveRef = useRef(false);
+  const autoWalkGenerationRef = useRef(0);
+  const scheduleNextAutoWalkRef = useRef<() => void>(() => {
+    /* assigned after scheduleNextAutoWalk is defined */
+  });
   const petAnimRef = useRef<{ name: CodexPetAnimationName; mode: "loop" | "once" }>({
     name: ANIMATIONS.idle,
     mode: "loop",
@@ -309,7 +323,8 @@ export default function App() {
     },
     defaultAnimation: ANIMATIONS.idle,
     waitingAnimation: ANIMATIONS.waiting,
-    waitingAfterMs: 10_000,
+    /** 长于自动巡逻间隔，先巡逻再发呆。 */
+    waitingAfterMs: 60_000,
   });
 
   /** New spritesheet / manifest: reset pose + animation so the swap is obvious and PetWidget remounts cleanly. */
@@ -331,6 +346,28 @@ export default function App() {
 
   petAnimRef.current = { name: pet.animation.name, mode: pet.animation.mode };
 
+  const stopAutoPatrol = useCallback(
+    (opts?: { toIdle?: boolean; reschedule?: boolean }) => {
+      autoWalkGenerationRef.current += 1;
+      if (autoWalkFrameRef.current != null) {
+        cancelAnimationFrame(autoWalkFrameRef.current);
+        autoWalkFrameRef.current = null;
+      }
+      autoWalkActiveRef.current = false;
+      if (opts?.toIdle) {
+        petDispatch({
+          type: "animation.set",
+          animation: ANIMATIONS.idle,
+          source: "user",
+        });
+      }
+      if (opts?.reschedule) {
+        scheduleNextAutoWalkRef.current();
+      }
+    },
+    [petDispatch],
+  );
+
   const clearAutoWalkTimers = useCallback(() => {
     if (autoScheduleTimerRef.current != null) {
       window.clearTimeout(autoScheduleTimerRef.current);
@@ -340,25 +377,22 @@ export default function App() {
       window.clearTimeout(autoWalkRunTimerRef.current);
       autoWalkRunTimerRef.current = null;
     }
-  }, []);
+    const wasPatrol = autoWalkActiveRef.current;
+    stopAutoPatrol({ toIdle: wasPatrol });
+  }, [stopAutoPatrol]);
 
-  const scheduleNextAutoWalk = useCallback(() => {
-    if (autoScheduleTimerRef.current != null) {
-      window.clearTimeout(autoScheduleTimerRef.current);
-      autoScheduleTimerRef.current = null;
+  const startAutoPatrol = useCallback(() => {
+    if (hoveringRef.current || pointerDownRef.current || isDraggingRef.current) {
+      scheduleNextAutoWalkRef.current();
+      return;
     }
-    const delay = AUTO_WALK_MIN_MS + Math.random() * (AUTO_WALK_MAX_MS - AUTO_WALK_MIN_MS);
-    autoScheduleTimerRef.current = window.setTimeout(() => {
-      autoScheduleTimerRef.current = null;
-      if (hoveringRef.current || pointerDownRef.current || isDraggingRef.current) {
-        scheduleNextAutoWalk();
-        return;
-      }
-      const { name, mode } = petAnimRef.current;
-      if (name !== ANIMATIONS.idle || mode !== "loop") {
-        scheduleNextAutoWalk();
-        return;
-      }
+    const { name, mode } = petAnimRef.current;
+    if (name !== ANIMATIONS.idle || mode !== "loop") {
+      scheduleNextAutoWalkRef.current();
+      return;
+    }
+
+    if (!isTauri()) {
       const run = Math.random() < 0.5 ? ANIMATIONS.runLeft : ANIMATIONS.runRight;
       petDispatch({
         type: "animation.play",
@@ -376,10 +410,192 @@ export default function App() {
           animation: ANIMATIONS.idle,
           source: "user",
         });
-        scheduleNextAutoWalk();
+        scheduleNextAutoWalkRef.current();
       }, AUTO_WALK_RUN_MS);
-    }, delay);
+      return;
+    }
+
+    const patrolGen = ++autoWalkGenerationRef.current;
+    autoWalkActiveRef.current = true;
+
+    void (async () => {
+      const win = getCurrentWindow();
+      const { w, h } = windowLogicalSizeRef.current;
+
+      let outer;
+      let scaleFactor: number;
+      let bounds: LogicalClampBounds | null;
+      try {
+        [outer, scaleFactor, bounds] = await Promise.all([
+          win.outerPosition(),
+          win.scaleFactor(),
+          getLogicalClampBounds(w, h),
+        ]);
+      } catch (err) {
+        petWarn("auto patrol: failed to read window state", {
+          err: err instanceof Error ? err.message : String(err),
+        });
+        autoWalkActiveRef.current = false;
+        scheduleNextAutoWalkRef.current();
+        return;
+      }
+
+      if (patrolGen !== autoWalkGenerationRef.current || !autoWalkActiveRef.current) {
+        autoWalkActiveRef.current = false;
+        return;
+      }
+
+      if (bounds == null) {
+        autoWalkActiveRef.current = false;
+        const run = Math.random() < 0.5 ? ANIMATIONS.runLeft : ANIMATIONS.runRight;
+        petDispatch({
+          type: "animation.play",
+          animation: run,
+          mode: "loop",
+          source: "user",
+        });
+        autoWalkRunTimerRef.current = window.setTimeout(() => {
+          autoWalkRunTimerRef.current = null;
+          if (patrolGen !== autoWalkGenerationRef.current) return;
+          petDispatch({
+            type: "animation.set",
+            animation: ANIMATIONS.idle,
+            source: "user",
+          });
+          scheduleNextAutoWalkRef.current();
+        }, AUTO_WALK_RUN_MS);
+        return;
+      }
+
+      const logicalPos = outer.toLogical(scaleFactor);
+      let x = logicalPos.x;
+      const y = logicalPos.y;
+
+      const minX = Math.min(bounds.minX, bounds.maxX);
+      const maxX = Math.max(bounds.minX, bounds.maxX);
+
+      let dir: 1 | -1;
+      if (x <= minX + AUTO_PATROL_EDGE_MARGIN) {
+        dir = 1;
+      } else if (x >= maxX - AUTO_PATROL_EDGE_MARGIN) {
+        dir = -1;
+      } else {
+        dir = Math.random() < 0.5 ? 1 : -1;
+      }
+
+      const speed =
+        AUTO_PATROL_SPEED_MIN +
+        Math.random() * (AUTO_PATROL_SPEED_MAX - AUTO_PATROL_SPEED_MIN);
+      const durationMs =
+        AUTO_PATROL_MIN_MS + Math.random() * (AUTO_PATROL_MAX_MS - AUTO_PATROL_MIN_MS);
+      const endTime = performance.now() + durationMs;
+      let lastFrameTime = performance.now();
+      let currentRunAnim: CodexPetAnimationName | null = null;
+
+      const setRunDirection = (nextDir: 1 | -1) => {
+        const anim = nextDir > 0 ? ANIMATIONS.runRight : ANIMATIONS.runLeft;
+        if (currentRunAnim === anim) return;
+        currentRunAnim = anim;
+        petDispatch({
+          type: "animation.play",
+          animation: anim,
+          mode: "loop",
+          source: "user",
+        });
+      };
+
+      const finishPatrol = (reschedule: boolean) => {
+        if (autoWalkFrameRef.current != null) {
+          cancelAnimationFrame(autoWalkFrameRef.current);
+          autoWalkFrameRef.current = null;
+        }
+        if (!autoWalkActiveRef.current) {
+          if (reschedule) scheduleNextAutoWalkRef.current();
+          return;
+        }
+        autoWalkActiveRef.current = false;
+        autoWalkGenerationRef.current += 1;
+        petDispatch({
+          type: "animation.set",
+          animation: ANIMATIONS.idle,
+          source: "user",
+        });
+        void persistCurrentWindowPosition(w, h);
+        if (reschedule) {
+          scheduleNextAutoWalkRef.current();
+        }
+      };
+
+      const tick = (now: number) => {
+        if (patrolGen !== autoWalkGenerationRef.current || !autoWalkActiveRef.current) {
+          autoWalkFrameRef.current = null;
+          return;
+        }
+
+        if (hoveringRef.current || pointerDownRef.current || isDraggingRef.current) {
+          finishPatrol(true);
+          return;
+        }
+
+        const dt = Math.min((now - lastFrameTime) / 1000, 0.05);
+        lastFrameTime = now;
+
+        if (now >= endTime) {
+          finishPatrol(true);
+          return;
+        }
+
+        x += dir * speed * dt;
+
+        if (x <= minX) {
+          x = minX;
+          if (dir < 0) {
+            dir = 1;
+            setRunDirection(dir);
+          }
+        } else if (x >= maxX) {
+          x = maxX;
+          if (dir > 0) {
+            dir = -1;
+            setRunDirection(dir);
+          }
+        } else {
+          if (x <= minX + AUTO_PATROL_EDGE_MARGIN && dir < 0) {
+            dir = 1;
+            setRunDirection(dir);
+          } else if (x >= maxX - AUTO_PATROL_EDGE_MARGIN && dir > 0) {
+            dir = -1;
+            setRunDirection(dir);
+          }
+        }
+
+        void win.setPosition(new LogicalPosition(x, y)).catch((err) => {
+          console.error("[auto-patrol] setPosition failed", err);
+        });
+
+        autoWalkFrameRef.current = requestAnimationFrame(tick);
+      };
+
+      setRunDirection(dir);
+      autoWalkFrameRef.current = requestAnimationFrame(tick);
+    })();
   }, [petDispatch]);
+
+  const scheduleNextAutoWalk = useCallback(() => {
+    if (autoScheduleTimerRef.current != null) {
+      window.clearTimeout(autoScheduleTimerRef.current);
+      autoScheduleTimerRef.current = null;
+    }
+    const delay = AUTO_WALK_MIN_MS + Math.random() * (AUTO_WALK_MAX_MS - AUTO_WALK_MIN_MS);
+    autoScheduleTimerRef.current = window.setTimeout(() => {
+      autoScheduleTimerRef.current = null;
+      startAutoPatrol();
+    }, delay);
+  }, [startAutoPatrol]);
+
+  useEffect(() => {
+    scheduleNextAutoWalkRef.current = scheduleNextAutoWalk;
+  }, [scheduleNextAutoWalk]);
 
   const onPetAction = useCallback(
     (action: PetAction<CodexPetAnimationName>) => {
@@ -597,6 +813,7 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void listen<string>("menu-action", (ev) => {
+      clearAutoWalkTimers();
       console.log("[menu-action] received:", ev.payload);
       const rawId = typeof ev.payload === "string" ? ev.payload : "";
       /** Menu stack may prefix ids on some platforms; match the leaf segment. */
@@ -689,7 +906,7 @@ export default function App() {
       unlisten?.();
       petLog("menu-action: listener removed");
     };
-  }, [petDispatch, applyDiskPet]);
+  }, [petDispatch, applyDiskPet, clearAutoWalkTimers]);
 
   const onPointerEnter = useCallback(() => {
     hoveringRef.current = true;
@@ -900,6 +1117,7 @@ export default function App() {
 
   const onContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    clearAutoWalkTimers();
     if (!isTauri()) return;
     void (async () => {
       try {
@@ -911,7 +1129,7 @@ export default function App() {
       }
       await invoke("show_context_menu", { x: e.clientX, y: e.clientY });
     })();
-  }, []);
+  }, [clearAutoWalkTimers]);
 
   return (
     <div
