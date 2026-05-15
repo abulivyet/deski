@@ -169,7 +169,9 @@ pub fn run() {
                 }
             };
 
+            
             let sep_before_quit = PredefinedMenuItem::separator(app)?;
+            let about = MenuItem::with_id(app, "about", "关于", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
             let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![
@@ -186,6 +188,7 @@ pub fn run() {
                 items.push(a);
             }
             items.push(&sep_before_quit);
+            items.push(&about);
             items.push(&quit);
 
             let submenu = Submenu::with_id_and_items(
@@ -217,6 +220,14 @@ pub fn run() {
                 "open-petdex" => {
                     if let Err(e) = app.opener().open_url("https://petdex.crafter.run/zh", None::<&str>) {
                         eprintln!("[Deski] open Petdex failed: {e}");
+                    }
+                }
+                "about" => {
+                    if let Err(e) = app
+                        .opener()
+                        .open_url("https://github.com/abulivyet/deski", None::<&str>)
+                    {
+                        eprintln!("[Deski] open About URL failed: {e}");
                     }
                 }
                 "autostart" => {

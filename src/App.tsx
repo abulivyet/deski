@@ -17,6 +17,14 @@ import {
   normalizeOpenDialogPath,
 } from "./lib/loadPetManifest";
 import { petError, petLog, petWarn } from "./lib/petDebug";
+import {
+  applyWindowPosition,
+  clampToLogicalBounds,
+  getLogicalClampBounds,
+  persistCurrentWindowPosition,
+  readStoredWindowPosition,
+  type LogicalClampBounds,
+} from "./lib/windowPosition";
 import { ANIMATIONS } from "./petAnimations";
 import type { PetManifest } from "./types/pet";
 import "./App.css";
@@ -32,6 +40,14 @@ const PET_DISPLAY_BASE_SCALE = 0.62;
  * 配合 PetWidget 底部 boundsPadding，减少 `overflow:hidden` 下裁脚。
  */
 const PET_VIEWPORT_BOTTOM_BLEED_PX = 10;
+/** pin=center 时通过不对称 padding 将精灵略向左移（逻辑 px）。 */
+const PET_CENTER_NUDGE_LEFT_PX = 4;
+const PET_BOUNDS_PADDING = {
+  top: 8,
+  right: 8 + PET_CENTER_NUDGE_LEFT_PX,
+  left: Math.max(0, 8 - PET_CENTER_NUDGE_LEFT_PX),
+  bottom: 18,
+} as const;
 
 /** 四档固定大小（与右键原生菜单一致）。 */
 const PET_SIZE_OPTIONS = [
@@ -117,6 +133,14 @@ export default function App() {
   });
 
   const spritesheetDisposeRef = useRef<(() => void) | null>(null);
+  const windowLogicalSizeRef = useRef({ w: 0, h: 0 });
+  const windowPositionRestoredRef = useRef(false);
+  const dragClampBoundsRef = useRef<LogicalClampBounds | null>(null);
+
+  windowLogicalSizeRef.current = {
+    w: Math.ceil(petDisplayWidthPx),
+    h: Math.ceil(petStageHeightPx),
+  };
   const releaseSpritesheet = useCallback(() => {
     spritesheetDisposeRef.current?.();
     spritesheetDisposeRef.current = null;
@@ -288,11 +312,33 @@ export default function App() {
     const w = Math.ceil(petDisplayWidthPx);
     const h = Math.ceil(petStageHeightPx);
     const tid = window.setTimeout(() => {
-      void getCurrentWindow()
-        .setSize(new LogicalSize(w, h))
-        .catch((err) => {
+      void (async () => {
+        const win = getCurrentWindow();
+        try {
+          await win.setSize(new LogicalSize(w, h));
+        } catch (err) {
           console.error("[pet-scale] setSize failed", err);
-        });
+        }
+
+        if (windowPositionRestoredRef.current) return;
+
+        const stored = readStoredWindowPosition();
+        if (stored == null) {
+          windowPositionRestoredRef.current = true;
+          return;
+        }
+
+        try {
+          const applied = await applyWindowPosition(stored.x, stored.y, w, h);
+          windowPositionRestoredRef.current = true;
+          petLog("window position restored", applied);
+        } catch (err) {
+          petWarn("window position restore failed", {
+            err: err instanceof Error ? err.message : String(err),
+          });
+          windowPositionRestoredRef.current = true;
+        }
+      })();
     }, WINDOW_RESIZE_DEBOUNCE_MS);
     return () => window.clearTimeout(tid);
   }, [petDisplayWidthPx, petStageHeightPx]);
@@ -554,22 +600,22 @@ export default function App() {
       isDraggingRef.current = false;
       lastDirectionRef.current = null;
       dragStartRef.current = null;
+      dragClampBoundsRef.current = null;
       sessionActiveRef.current = true;
 
       void (async () => {
         try {
           if (isTauri()) {
             const appWindow = getCurrentWindow();
-            const outer = await appWindow.outerPosition();
-            const scaleFactor = await appWindow.scaleFactor();
+            const { w, h } = windowLogicalSizeRef.current;
+            const [outer, scaleFactor, clampBounds] = await Promise.all([
+              appWindow.outerPosition(),
+              appWindow.scaleFactor(),
+              getLogicalClampBounds(w, h),
+            ]);
             const logical = outer.toLogical(scaleFactor);
-            console.log("[deski-drag] pointerdown outerPosition", {
-              physical: { x: outer.x, y: outer.y },
-              scaleFactor,
-              logical: { x: logical.x, y: logical.y },
-              mouse: { x: e.screenX, y: e.screenY },
-            });
             if (generation !== gestureGenerationRef.current) return;
+            dragClampBoundsRef.current = clampBounds;
             dragStartRef.current = {
               mouseX: e.screenX,
               mouseY: e.screenY,
@@ -609,9 +655,13 @@ export default function App() {
           isDraggingRef.current = true;
         }
 
-        const nextX = d.windowX + dx;
-        const nextY = d.windowY + dy;
-        console.log("[deski-drag] pointermove", { dx, dy, nextX, nextY });
+        const rawX = d.windowX + dx;
+        const rawY = d.windowY + dy;
+        const { x: nextX, y: nextY } = clampToLogicalBounds(
+          rawX,
+          rawY,
+          dragClampBoundsRef.current,
+        );
 
         if (isTauri()) {
           const appWindow = getCurrentWindow();
@@ -649,6 +699,7 @@ export default function App() {
         const hadDragStart = dragStartRef.current !== null;
         const didDrag = isDraggingRef.current;
         dragStartRef.current = null;
+        dragClampBoundsRef.current = null;
         isDraggingRef.current = false;
         lastDirectionRef.current = null;
         pointerDownRef.current = false;
@@ -659,6 +710,10 @@ export default function App() {
         }
 
         if (didDrag) {
+          if (isTauri()) {
+            const { w, h } = windowLogicalSizeRef.current;
+            void persistCurrentWindowPosition(w, h);
+          }
           petDispatch({
             type: "animation.set",
             animation: ANIMATIONS.idle,
@@ -725,7 +780,7 @@ export default function App() {
               pin={pet.pin}
               draggable={false}
               scale={petDisplayScale}
-              boundsPadding={{ top: 8, right: 8, left: 8, bottom: 18 }}
+              boundsPadding={PET_BOUNDS_PADDING}
               className="pet-desk"
               ariaLabel={`${manifest.displayName} 桌宠`}
               onAction={onPetAction}

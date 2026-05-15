@@ -8,6 +8,8 @@
     "core:window:allow-set-position",
     "core:window:allow-outer-position",
     "core:window:allow-set-size",
+    "core:window:allow-scale-factor",
+    "core:window:allow-available-monitors",
     "opener:default",
     "fs:default",
     "fs:read-files",
