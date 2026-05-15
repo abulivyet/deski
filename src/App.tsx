@@ -26,6 +26,14 @@ import {
   type LogicalClampBounds,
 } from "./lib/windowPosition";
 import {
+  loadPetPayloadFromBundledId,
+  loadPetPayloadFromDiskPath,
+  pushRecentPet,
+  recentPetsForMenuSync,
+  removeRecentPet,
+  type LoadPetPayload,
+} from "./lib/recentPets";
+import {
   opacityToMenuKey,
   readInitialPetOpacity,
   readStoredAlwaysOnTop,
@@ -156,21 +164,54 @@ export default function App() {
     spritesheetDisposeRef.current = null;
   }, []);
 
+  const applyBundledPet = useCallback(
+    async (bundledId: string) => {
+      const m = await loadPetManifest(bundledId);
+      releaseSpritesheet();
+      setManifest(m);
+      setSpritesheetSrc(getPetSpritesheetUrl(bundledId, m));
+      setLoadError(null);
+      localStorage.removeItem(PET_JSON_PATH_LS_KEY);
+      const recentEntry = loadPetPayloadFromBundledId(bundledId);
+      if (recentEntry) pushRecentPet(recentEntry);
+      petLog("pet loaded (bundled)", { bundledId, id: m.id });
+    },
+    [releaseSpritesheet],
+  );
+
+  const applyDiskPet = useCallback(
+    async (petJsonPath: string) => {
+      const loaded = await loadPetFromPath(petJsonPath);
+      releaseSpritesheet();
+      spritesheetDisposeRef.current = loaded.disposeSpritesheet ?? null;
+      setManifest(loaded.manifest);
+      setSpritesheetSrc(loaded.spritesheetSrc);
+      setLoadError(null);
+      localStorage.setItem(PET_JSON_PATH_LS_KEY, petJsonPath);
+      pushRecentPet(loadPetPayloadFromDiskPath(petJsonPath, loaded.manifest));
+      petLog("pet loaded (disk)", {
+        id: loaded.manifest.id,
+        path: petJsonPath.slice(0, 200),
+      });
+    },
+    [releaseSpritesheet],
+  );
+
   useEffect(() => {
     let cancelled = false;
     setLoadError(null);
     setManifest(null);
     setSpritesheetSrc(null);
 
-    const loadBundled = async () => {
-      petLog("startup: loading bundled pet", { petId: "dropout-bear" });
-      const m = await loadPetManifest("dropout-bear");
+    const loadBundled = async (bundledId = "dropout-bear") => {
+      petLog("startup: loading bundled pet", { petId: bundledId });
+      const m = await loadPetManifest(bundledId);
       if (cancelled) return;
       releaseSpritesheet();
       setManifest(m);
-      setSpritesheetSrc(getPetSpritesheetUrl("dropout-bear", m));
+      setSpritesheetSrc(getPetSpritesheetUrl(bundledId, m));
       setLoadError(null);
-      petLog("startup: bundled ready", { id: m.id, src: getPetSpritesheetUrl("dropout-bear", m) });
+      petLog("startup: bundled ready", { id: m.id, src: getPetSpritesheetUrl(bundledId, m) });
     };
 
     const run = async () => {
@@ -193,6 +234,7 @@ export default function App() {
             setManifest(loaded.manifest);
             setSpritesheetSrc(loaded.spritesheetSrc);
             setLoadError(null);
+            pushRecentPet(loadPetPayloadFromDiskPath(saved, loaded.manifest));
             petLog("startup: disk pet ready", {
               id: loaded.manifest.id,
               spritesheetSrcPrefix: loaded.spritesheetSrc.slice(0, 48),
@@ -225,6 +267,40 @@ export default function App() {
       releaseSpritesheet();
     };
   }, [releaseSpritesheet]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<LoadPetPayload>("load-pet", (ev) => {
+      const p = ev.payload;
+      if (!p || typeof p.kind !== "string") return;
+      void (async () => {
+        try {
+          if (p.kind === "bundled" && p.bundledId) {
+            await applyBundledPet(p.bundledId);
+          } else if (p.kind === "disk" && p.petJsonPath) {
+            await applyDiskPet(p.petJsonPath);
+          }
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          setLoadError(msg);
+          removeRecentPet(p);
+          petWarn("load-pet failed", { payload: p, err: msg });
+        }
+      })();
+    }).then((fn) => {
+      if (cancelled) fn();
+      else {
+        unlisten = fn;
+        petLog("load-pet: listener registered");
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [applyBundledPet, applyDiskPet]);
 
   const { pet, petDispatch } = usePetController<CodexPetAnimationName>({
     initialState: {
@@ -587,33 +663,11 @@ export default function App() {
               return;
             }
             try {
-              console.log("[change-pet] step:before loadPetFromPath()", { selected: selected.slice(0, 240) });
-              const loaded = await loadPetFromPath(selected);
-              console.log("[change-pet] step:after loadPetFromPath()", {
-                manifestId: loaded.manifest.id,
-                displayName: loaded.manifest.displayName,
-                spritesheetSrcPrefix: loaded.spritesheetSrc.slice(0, 64),
-              });
-              releaseSpritesheet();
-              console.log("[change-pet] step:after releaseSpritesheet()");
-              spritesheetDisposeRef.current = loaded.disposeSpritesheet ?? null;
-              console.log("[change-pet] step:after assign spritesheetDisposeRef", {
-                hasDispose: Boolean(loaded.disposeSpritesheet),
-              });
-              setManifest(loaded.manifest);
-              setSpritesheetSrc(loaded.spritesheetSrc);
-              console.log("[change-pet] step:after setManifest + setSpritesheetSrc (scheduled)");
-              localStorage.setItem(PET_JSON_PATH_LS_KEY, selected);
-              console.log("[change-pet] step:after localStorage.setItem", { key: PET_JSON_PATH_LS_KEY });
-              setLoadError(null);
-              console.log("[change-pet] step:after setLoadError(null) — done");
+              await applyDiskPet(selected);
             } catch (e: unknown) {
               const msg = e instanceof Error ? e.message : String(e);
-              console.log("[change-pet] step:catch loadPetFromPath / apply", {
-                selected: selected.slice(0, 240),
-                error: msg,
-              });
               setLoadError(msg);
+              petWarn("change-pet failed", { selected: selected.slice(0, 240), err: msg });
             }
           })();
           break;
@@ -635,7 +689,7 @@ export default function App() {
       unlisten?.();
       petLog("menu-action: listener removed");
     };
-  }, [petDispatch, releaseSpritesheet, setManifest, setSpritesheetSrc, setLoadError]);
+  }, [petDispatch, applyDiskPet]);
 
   const onPointerEnter = useCallback(() => {
     hoveringRef.current = true;
@@ -847,7 +901,16 @@ export default function App() {
   const onContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     if (!isTauri()) return;
-    void invoke("show_context_menu", { x: e.clientX, y: e.clientY });
+    void (async () => {
+      try {
+        await invoke("sync_recent_pets_menu", { items: recentPetsForMenuSync() });
+      } catch (err) {
+        petWarn("sync_recent_pets_menu failed", {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+      await invoke("show_context_menu", { x: e.clientX, y: e.clientY });
+    })();
   }, []);
 
   return (

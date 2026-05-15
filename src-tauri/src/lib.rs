@@ -1,6 +1,9 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod pet_menus;
+
 use std::sync::Mutex;
 
+use pet_menus::{DynamicPetMenu, LoadPetPayload, INSTALLED_SLOTS, RECENT_SLOTS};
 use serde_json::json;
 use tauri::{
     menu::{CheckMenuItem, IsMenuItem, MenuItem, PredefinedMenuItem, Submenu},
@@ -60,6 +63,8 @@ struct PetContextMenu {
     click_through_enabled: Mutex<bool>,
     pet_size: PetSizeMenu,
     pet_opacity: PetOpacityMenu,
+    recent: DynamicPetMenu,
+    installed: DynamicPetMenu,
 }
 
 #[cfg(desktop)]
@@ -253,6 +258,13 @@ fn sync_always_on_top_menu_selection(app: tauri::AppHandle, enabled: bool) -> Re
 }
 
 #[tauri::command]
+fn sync_recent_pets_menu(app: tauri::AppHandle, items: Vec<LoadPetPayload>) -> Result<(), String> {
+    let ctx = app.state::<PetContextMenu>();
+    ctx.recent.sync_slots(items);
+    Ok(())
+}
+
+#[tauri::command]
 fn sync_click_through_menu_selection(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     if let Ok(mut state) = app.state::<PetContextMenu>().click_through_enabled.lock() {
         *state = enabled;
@@ -287,6 +299,7 @@ fn show_context_menu(app: tauri::AppHandle, x: f64, y: f64) -> Result<(), String
         .map(|g| *g)
         .unwrap_or(false);
     sync_click_through_menu_checks(&app, click_through);
+    ctx.installed.refresh_installed_from_disk();
     window
         .popup_menu_at(&ctx.root, tauri::LogicalPosition::new(x, y))
         .map_err(|e| e.to_string())
@@ -335,7 +348,52 @@ pub fn run() {
                 &[&waving, &running, &review, &failed],
             )?;
 
-            let change_pet = MenuItem::with_id(app, "change-pet", "更换宠物", true, None::<&str>)?;
+            let change_pet = MenuItem::with_id(app, "change-pet", "更换宠物…", true, None::<&str>)?;
+
+            let recent = DynamicPetMenu::new_empty_slots(app, "recent", RECENT_SLOTS)?;
+            let recent_item_refs: Vec<&dyn IsMenuItem<Wry>> = recent
+                .items
+                .iter()
+                .map(|i| i as &dyn IsMenuItem<Wry>)
+                .collect();
+            let recent_menu = Submenu::with_id_and_items(
+                app,
+                "recent-menu",
+                "最近使用",
+                true,
+                &recent_item_refs,
+            )?;
+
+            let installed = DynamicPetMenu::new_empty_slots(app, "installed", INSTALLED_SLOTS)?;
+            let installed_item_refs: Vec<&dyn IsMenuItem<Wry>> = installed
+                .items
+                .iter()
+                .map(|i| i as &dyn IsMenuItem<Wry>)
+                .collect();
+            let installed_menu = Submenu::with_id_and_items(
+                app,
+                "installed-menu",
+                "已安装（~/.codex/pets）",
+                true,
+                &installed_item_refs,
+            )?;
+
+            let bundled_dropout = MenuItem::with_id(
+                app,
+                "bundled-dropout-bear",
+                "Dropout Bear",
+                true,
+                None::<&str>,
+            )?;
+            let bundled_boba = MenuItem::with_id(app, "bundled-boba", "Boba", true, None::<&str>)?;
+            let bundled_menu = Submenu::with_id_and_items(
+                app,
+                "bundled-menu",
+                "内置宠物",
+                true,
+                &[&bundled_dropout, &bundled_boba],
+            )?;
+
             let open_petdex = MenuItem::with_id(
                 app,
                 "open-petdex",
@@ -416,6 +474,9 @@ pub fn run() {
 
             let mut items: Vec<&dyn IsMenuItem<Wry>> = vec![
                 &change_pet,
+                &recent_menu,
+                &installed_menu,
+                &bundled_menu,
                 &open_petdex,
                 &sep_after_pet,
                 &pet_size_menu,
@@ -449,6 +510,8 @@ pub fn run() {
                 click_through_enabled: Mutex::new(false),
                 pet_size,
                 pet_opacity,
+                recent,
+                installed,
             });
 
             #[cfg(desktop)]
@@ -539,6 +602,20 @@ pub fn run() {
                     }
                 }
                 "click-through" | "tray-click-through" => toggle_click_through(app),
+                "bundled-dropout-bear" => {
+                    pet_menus::emit_bundled_pet(app, "dropout-bear", "Dropout Bear");
+                }
+                "bundled-boba" => {
+                    pet_menus::emit_bundled_pet(app, "boba", "Boba");
+                }
+                id if id.starts_with("recent-") => {
+                    let ctx = app.state::<PetContextMenu>();
+                    let _ = pet_menus::try_emit_dynamic_slot(app, id, "recent-", &ctx.recent);
+                }
+                id if id.starts_with("installed-") => {
+                    let ctx = app.state::<PetContextMenu>();
+                    let _ = pet_menus::try_emit_dynamic_slot(app, id, "installed-", &ctx.installed);
+                }
                 "autostart" => {
                     #[cfg(desktop)]
                     {
@@ -588,6 +665,7 @@ pub fn run() {
             sync_pet_opacity_menu_selection,
             sync_always_on_top_menu_selection,
             sync_click_through_menu_selection,
+            sync_recent_pets_menu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
