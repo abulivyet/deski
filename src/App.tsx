@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import {
   PetWidget,
   codexPetAtlas,
@@ -23,11 +23,54 @@ import "./App.css";
 
 const PET_JSON_PATH_LS_KEY = "petJsonPath";
 
-/** 1 = atlas 原始格子大小；略小于 1 让桌宠占屏更小。 */
-const PET_DISPLAY_SCALE = 0.62;
+const PET_SCALE_LS_KEY = "pet-scale";
+const DEFAULT_SCALE = 1.0;
+/** 历史显示基准；用户 100% = 1.0 在此基础上缩放。 */
+const PET_DISPLAY_BASE_SCALE = 0.62;
+/**
+ * 精灵脚底相对 atlas 单元格可能略低；窗口/舞台高度在逻辑像素上略增，
+ * 配合 PetWidget 底部 boundsPadding，减少 `overflow:hidden` 下裁脚。
+ */
+const PET_VIEWPORT_BOTTOM_BLEED_PX = 10;
 
-const petDisplayWidthPx = codexPetAtlas.cellWidth * PET_DISPLAY_SCALE;
-const petDisplayHeightPx = codexPetAtlas.cellHeight * PET_DISPLAY_SCALE;
+/** 四档固定大小（与右键原生菜单一致）。 */
+const PET_SIZE_OPTIONS = [
+  { key: "small", label: "小", percent: "75%", scale: 0.75 },
+  { key: "normal", label: "默认", percent: "100%", scale: 1.0 },
+  { key: "large", label: "大", percent: "125%", scale: 1.25 },
+  { key: "xlarge", label: "超大", percent: "150%", scale: 1.5 },
+] as const;
+
+/** 调整 Tauri 窗口逻辑尺寸的防抖（ms）。 */
+const WINDOW_RESIZE_DEBOUNCE_MS = 150;
+
+function snapStoredScaleToPreset(raw: string | null): number {
+  if (raw == null || raw === "") return DEFAULT_SCALE;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_SCALE;
+  let best = DEFAULT_SCALE;
+  let bestD = Infinity;
+  for (const o of PET_SIZE_OPTIONS) {
+    const d = Math.abs(n - o.scale);
+    if (d < bestD) {
+      bestD = d;
+      best = o.scale;
+    }
+  }
+  return best;
+}
+
+function readInitialPetUserScale(): number {
+  if (typeof localStorage === "undefined") return DEFAULT_SCALE;
+  return snapStoredScaleToPreset(localStorage.getItem(PET_SCALE_LS_KEY));
+}
+
+function scaleToMenuKey(scale: number): string {
+  for (const o of PET_SIZE_OPTIONS) {
+    if (Math.abs(scale - o.scale) < 1e-6) return o.key;
+  }
+  return "normal";
+}
 
 /** Screen distance before a pointer gesture counts as a drag (not a click). */
 const DRAG_THRESHOLD_PX = 6;
@@ -42,6 +85,12 @@ export default function App() {
   const [manifest, setManifest] = useState<PetManifest | null>(null);
   const [spritesheetSrc, setSpritesheetSrc] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [petUserScale, setPetUserScale] = useState(() => readInitialPetUserScale());
+
+  const petDisplayScale = PET_DISPLAY_BASE_SCALE * petUserScale;
+  const petDisplayWidthPx = codexPetAtlas.cellWidth * petDisplayScale;
+  const petDisplayHeightPx = codexPetAtlas.cellHeight * petDisplayScale;
+  const petStageHeightPx = petDisplayHeightPx + PET_VIEWPORT_BOTTOM_BLEED_PX;
 
   const hoveringRef = useRef(false);
   /** One waving per hover session; reset on pointer leave. */
@@ -233,6 +282,57 @@ export default function App() {
     },
     [petDispatch, scheduleNextAutoWalk],
   );
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const w = Math.ceil(petDisplayWidthPx);
+    const h = Math.ceil(petStageHeightPx);
+    const tid = window.setTimeout(() => {
+      void getCurrentWindow()
+        .setSize(new LogicalSize(w, h))
+        .catch((err) => {
+          console.error("[pet-scale] setSize failed", err);
+        });
+    }, WINDOW_RESIZE_DEBOUNCE_MS);
+    return () => window.clearTimeout(tid);
+  }, [petDisplayWidthPx, petStageHeightPx]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const key = scaleToMenuKey(petUserScale);
+    void invoke("sync_pet_size_menu_selection", { key }).catch(() => {
+      /* ignore */
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载时与 Rust 菜单勾选对齐
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    type PetSizePayload = { key: string; scale: number };
+    void listen<PetSizePayload>("pet-size", (ev) => {
+      const p = ev.payload;
+      if (!p || typeof p.scale !== "number") return;
+      setPetUserScale(p.scale);
+      try {
+        localStorage.setItem(PET_SCALE_LS_KEY, String(p.scale));
+      } catch {
+        /* ignore */
+      }
+    }).then((fn) => {
+      if (cancelled) fn();
+      else {
+        unlisten = fn;
+        petLog("pet-size: listener registered");
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      petLog("pet-size: listener removed");
+    };
+  }, []);
 
   useEffect(() => {
     const modeOnce = pet.animation.mode === "once";
@@ -596,46 +696,50 @@ export default function App() {
   return (
     <div
       className="app"
-      data-pet-root
-      onContextMenu={onContextMenu}
       style={
         {
           "--pet-display-w": `${petDisplayWidthPx}px`,
-          "--pet-display-h": `${petDisplayHeightPx}px`,
+          "--pet-display-h": `${petStageHeightPx}px`,
         } as React.CSSProperties
       }
     >
       <div
-        className="pet-stage pet-container"
-        onPointerDown={onPetPointerDown}
-        onPointerEnter={onPointerEnter}
-        onPointerLeave={onPointerLeave}
+        className="pet-window-root"
+        data-pet-root
+        onContextMenu={onContextMenu}
       >
-        <div className="pet-stage-sizer" aria-hidden />
-        {manifest !== null && spritesheetSrc !== null ? (
-          <PetWidget<CodexPetAnimationName>
-            key={spritesheetSrc}
-            src={spritesheetSrc}
-            atlas={codexPetAtlas}
-            animation={pet.animation}
-            position={pet.position}
-            pin={pet.pin}
-            draggable={false}
-            scale={PET_DISPLAY_SCALE}
-            boundsPadding={8}
-            className="pet-desk"
-            ariaLabel={`${manifest.displayName} 桌宠`}
-            onAction={onPetAction}
-          />
-        ) : loadError !== null ? (
-          <div className="pet-load-error" role="alert">
-            {loadError}
-          </div>
-        ) : (
-          <div className="pet-load-placeholder" aria-busy="true">
-            Loading pet…
-          </div>
-        )}
+        <div
+          className="pet-stage pet-container"
+          onPointerDown={onPetPointerDown}
+          onPointerEnter={onPointerEnter}
+          onPointerLeave={onPointerLeave}
+        >
+          <div className="pet-stage-sizer" aria-hidden />
+          {manifest !== null && spritesheetSrc !== null ? (
+            <PetWidget<CodexPetAnimationName>
+              key={spritesheetSrc}
+              src={spritesheetSrc}
+              atlas={codexPetAtlas}
+              animation={pet.animation}
+              position={pet.position}
+              pin={pet.pin}
+              draggable={false}
+              scale={petDisplayScale}
+              boundsPadding={{ top: 8, right: 8, left: 8, bottom: 18 }}
+              className="pet-desk"
+              ariaLabel={`${manifest.displayName} 桌宠`}
+              onAction={onPetAction}
+            />
+          ) : loadError !== null ? (
+            <div className="pet-load-error" role="alert">
+              {loadError}
+            </div>
+          ) : (
+            <div className="pet-load-placeholder" aria-busy="true">
+              Loading pet…
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

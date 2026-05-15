@@ -13,14 +13,17 @@ body,
   outline: none;
   background: transparent;
   overflow: hidden;
+  width: 100%;
+  height: 100%;
 }
 
 #root {
-  width: fit-content;
-  height: fit-content;
+  min-width: 0;
+  min-height: 0;
 }
 
 .app,
+.pet-window-root,
 .pet-stage,
 .pet-container,
 .pet-stage-sizer,
@@ -28,43 +31,54 @@ body,
   border: none;
   outline: none;
   box-shadow: none;
-  background: transparent;
 }
 
 .app {
   --pet-display-w: 119px;
   --pet-display-h: 129px;
-  display: flex;
-  width: fit-content;
-  height: fit-content;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
 }
 
-/* In-flow box: PetWidget is fixed/out of flow; this keeps .pet-stage hit-testing and fit-content sizing. */
-.pet-stage-sizer {
-  flex-shrink: 0;
+/* 铺满 Webview；宠物舞台固定在左下角，不随窗口变宽而整窗居中重排。 */
+.pet-window-root {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: transparent;
+}
+
+.pet-stage {
+  position: absolute;
+  left: 0;
+  bottom: 0;
   width: var(--pet-display-w);
   height: var(--pet-display-h);
-  pointer-events: none;
-}
-
-/* Receives mousedown / click; PetWidget is fixed and uses pointer-events: none so events reach here. */
-.pet-stage {
-  position: relative;
-  width: fit-content;
-  height: fit-content;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
   cursor: grab;
+  z-index: 1;
 }
 
 .pet-stage:active {
   cursor: grabbing;
 }
 
-/* Let clicks pass through the fixed PetWidget layer to .pet-stage. */
+.pet-stage-sizer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
 .pet-desk {
   pointer-events: none;
 }
 
-/* Overlays: absolute so they never expand the shrink-wrapped layout. */
 .pet-context-menu,
 .pet-name-bubble {
   position: absolute;
