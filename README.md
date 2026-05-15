@@ -1,92 +1,211 @@
 # Deski
 
-**Deski** 是一个用 [Tauri 2](https://v2.tauri.app/) + [React 19](https://react.dev/) 做的小型**桌面宠物**：无边框透明窗口、置顶、不进任务栏，在桌面上显示一只可互动的雪碧图宠物。
+**Deski** is a tiny desktop pet app for Codex / Petdex-style pets.
 
-## 功能概览
+It lives on your desktop as a transparent, always-on-top companion, can load pets from `pet.json + spritesheet.webp`, and understands the same 8x9 sprite atlas used by `codex-pets-react`.
 
-- **内置宠物**：默认从 `public/pets/<id>/` 加载 `pet.json` 与雪碧图（示例：`dropout-bear`）。
-- **更换宠物**：右键打开原生菜单，选择磁盘上的 `pet.json`；雪碧图路径在 manifest 里解析（支持相对 `pet.json` 目录或绝对路径），读盘后经 `blob:` URL 显示。
-- **动画与状态**：使用 [`codex-pets-react`](https://www.npmjs.com/package/codex-pets-react) 的 `PetWidget`、`codexPetAtlas`（8×9 图集）与 `usePetController`（idle / 跑 / 挥手 / 跳跃等）。
-- **拖动窗口**：在宠物区域按下并移动超过阈值后调用 `startDragging()`，与跑步动画联动。
-- **原生右键菜单**：Rust 侧 `popup_menu_at`，通过 `menu-action` 事件驱动前端逻辑。
+![Deski app icon](app-icon.png)
 
-## 技术栈
+> Built with Tauri 2, React 19, and `codex-pets-react`.
 
-| 部分 | 技术 |
-|------|------|
-| 桌面壳 | Tauri 2、Rust 2021 |
-| 前端 | React 19、TypeScript、Vite 7 |
-| 宠物 UI | `codex-pets-react` |
-| 系统能力 | `@tauri-apps/plugin-fs`（读 manifest / 雪碧图）、`plugin-dialog`（选文件）、`plugin-opener` |
-| 权限 | `src-tauri/capabilities/default.json`（`fs` scope、`dialog` 等） |
+## Why Deski
 
-## 环境要求
+Codex pets are delightful inside Codex. Deski lets them step out onto your desktop.
 
-- [Node.js](https://nodejs.org/)（建议当前 LTS）
-- [Rust](https://www.rust-lang.org/tools/install) 与 Tauri 2 桌面依赖（macOS 上需 Xcode Command Line Tools 等）
+Instead of inventing another pet format, Deski focuses on compatibility with the existing Petdex / Codex pet package shape:
 
-## 开发与构建
+```text
+pet.json
+spritesheet.webp
+```
+
+That means pets downloaded from Petdex, installed under `~/.codex/pets`, or created with Codex pet tooling can be loaded by Deski with very little friction.
+
+## Features
+
+- **Transparent desktop pet window**: frameless, always-on-top, and hidden from the taskbar.
+- **Petdex-style pet loading**: load a local `pet.json` and its matching spritesheet.
+- **Installed pet discovery**: scans `~/.codex/pets/*/pet.json` for Codex-compatible pets.
+- **Built-in pets**: ships with sample pets such as Dropout Bear and Boba.
+- **Recent pets menu**: quickly switch back to pets you have used before.
+- **Native right-click menu**: change pets, trigger actions, adjust appearance, and quit.
+- **Interactive animations**: hover to wave, click to jump, drag to run.
+- **Auto patrol**: the pet can occasionally walk short distances and turn around near screen edges.
+- **Idle / waiting behavior**: after a longer quiet period, the pet can settle into a waiting state.
+- **Window controls**: size presets, opacity presets, always-on-top, click-through, tray menu, and autostart.
+
+## Quick Start
+
+### Requirements
+
+- Node.js
+- Rust
+- Tauri 2 desktop prerequisites for your platform
+
+### Run locally
 
 ```bash
-# 安装依赖
 npm install
-
-# 开发（Vite + Tauri，热更新前端）
 npm run tauri dev
+```
 
-# 仅前端
-npm run dev
+### Build
 
-# 生产构建（前端 tsc + vite build，再打包 Tauri）
+```bash
 npm run tauri build
 ```
 
-调试构建下会在 `setup` 中为主窗口打开 **WebView 开发者工具**（`#[cfg(debug_assertions)]`）。
+For frontend-only development:
 
-## 自定义宠物（PetDex 风格 manifest）
+```bash
+npm run dev
+```
 
-在任意目录放置 `pet.json`，例如：
+## Using Pets
+
+### Load a pet from disk
+
+Right-click the pet, choose **更换宠物…**, then select a `pet.json` file.
+
+Example pet package:
+
+```text
+my-pet/
+  pet.json
+  spritesheet.webp
+```
+
+Example `pet.json`:
 
 ```json
 {
   "id": "my-pet",
   "displayName": "My Pet",
-  "description": "可选说明",
+  "description": "A tiny companion for your desktop.",
   "spritesheetPath": "spritesheet.webp"
 }
 ```
 
-- **`spritesheetPath`**：相对于 `pet.json` 所在目录的文件名，或本机绝对路径。
-- 雪碧图需与 [`codex-pets-react`](https://www.npmjs.com/package/codex-pets-react) 内置 atlas 一致（8 列 × 9 行格子布局）。
+`spritesheetPath` may be relative to the `pet.json` file or an absolute local path.
 
-内置资源放在 **`public/pets/<petId>/`**，开发时通过 HTTP 路径 `/pets/<petId>/...` 访问。
+### Load installed Codex pets
 
-## 应用图标
+Deski scans:
 
-从根目录源图重新生成 `src-tauri/icons/` 下全套图标（含 `.icns` / `.ico` / 各尺寸 PNG）：
+```text
+~/.codex/pets
+```
+
+Expected structure:
+
+```text
+~/.codex/pets/my-pet/
+  pet.json
+  spritesheet.webp
+```
+
+Open the right-click menu and use **已安装（~/.codex/pets）** to pick one.
+
+### Built-in pets
+
+Built-in pet assets live under:
+
+```text
+public/pets/<pet-id>/
+```
+
+Each built-in pet has the same `pet.json + spritesheet.webp` shape.
+
+## Pet Format
+
+Deski currently expects pets to use the atlas layout from `codex-pets-react`:
+
+- 8 columns
+- 9 rows
+- one spritesheet image
+- animation names such as `idle`, `waving`, `jumping`, `running-left`, `running-right`, `failed`, `waiting`, `running`, and `review`
+
+Deski intentionally keeps this format small so it stays compatible with Codex / Petdex-style pets.
+
+## Controls
+
+Right-click the pet to open the native menu.
+
+Common actions:
+
+- Change pet
+- Pick a recent pet
+- Pick an installed pet from `~/.codex/pets`
+- Pick a built-in pet
+- Open Petdex
+- Change size
+- Change opacity
+- Toggle always-on-top
+- Toggle click-through
+- Trigger demo animations
+- Quit
+
+The tray icon can also show, hide, toggle click-through, or quit the app.
+
+## Project Structure
+
+```text
+desktop-pet/
+  src/                 React app
+  src/lib/             pet loading, recent pets, window settings, window position helpers
+  public/pets/         built-in pet packages
+  src-tauri/           Tauri app, native menu, tray, commands, permissions
+  app-icon.png         source app icon
+```
+
+## Tech Stack
+
+| Area | Technology |
+| --- | --- |
+| Desktop shell | Tauri 2, Rust 2021 |
+| Frontend | React 19, TypeScript, Vite |
+| Pet rendering | `codex-pets-react` |
+| Native features | Tauri fs, dialog, opener, autostart, tray |
+
+## Roadmap Ideas
+
+- A small settings window for pet management.
+- Friendlier import validation for broken pet packages.
+- Better visual feedback when a pet fails to load.
+- More natural idle / patrol scheduling.
+- Optional speech bubbles for lightweight desktop feedback.
+- A guided flow that helps users create pets with Codex, while still keeping Deski focused on displaying and managing pets.
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+Good first areas to explore:
+
+- pet package validation
+- menu and tray polish
+- multi-monitor behavior
+- Windows and Linux testing
+- README screenshots / demo videos
+- additional built-in pets
+
+## Development Notes
+
+The Tauri app uses a transparent, undecorated main window:
+
+- `alwaysOnTop: true`
+- `skipTaskbar: true`
+- `transparent: true`
+- `decorations: false`
+
+During debug builds, the main WebView may open devtools automatically.
+
+Regenerate app icons with:
 
 ```bash
 npx tauri icon app-icon.png
 ```
 
-`src-tauri/tauri.conf.json` 里 `bundle.icon` 已指向 `icons/` 下对应文件。
+## License
 
-## 目录结构（简要）
-
-```
-desktop-pet/
-├── src/                 # React 应用（App、loadPetManifest、动画常量等）
-├── public/pets/         # 内置宠物资源
-├── src-tauri/           # Rust + Tauri 配置
-│   ├── src/lib.rs       # 入口、菜单、IPC、事件 emit
-│   ├── capabilities/    # ACL 权限
-│   └── icons/           # 打包用图标（由 tauri icon 生成）
-├── app-icon.png         # 图标源图（可选）
-└── package.json
-```
-
-## 名称与包标识
-
-- 用户可见名称：**Deski**（`tauri.conf.json` 的 `productName`、窗口 `title` 等）。
-- npm 包名：`deski`。
-- Tauri **`identifier`** 仍为 `com.abulivyet.desktop-pet`（如需上架或独立安装身份，可自行改为新 bundle id）。
+No license has been declared yet. Add one before publishing binaries or accepting external contributions.
