@@ -1,4 +1,10 @@
-import { availableMonitors, getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
+import {
+  availableMonitors,
+  currentMonitor,
+  getCurrentWindow,
+  LogicalPosition,
+  type Monitor,
+} from "@tauri-apps/api/window";
 import { petLog, petWarn } from "./petDebug";
 
 export const PET_WINDOW_POS_LS_KEY = "pet-window-pos";
@@ -38,36 +44,86 @@ export function writeStoredWindowPosition(x: number, y: number): void {
   }
 }
 
-/** Union of all monitor work areas in logical coordinates for the current window scale. */
-export async function getLogicalClampBounds(
+/** Global physical work-area edges (workArea is relative to monitor on macOS). */
+function workAreaGlobalPhysical(m: Monitor): {
+  minPhysX: number;
+  minPhysY: number;
+  maxPhysX: number;
+  maxPhysY: number;
+} {
+  const wa = m.workArea;
+  const minPhysX = m.position.x + wa.position.x;
+  const minPhysY = m.position.y + wa.position.y;
+  return {
+    minPhysX,
+    minPhysY,
+    maxPhysX: minPhysX + wa.size.width,
+    maxPhysY: minPhysY + wa.size.height,
+  };
+}
+
+function boundsFromMonitor(
+  m: Monitor,
   winLogicalW: number,
   winLogicalH: number,
-): Promise<LogicalClampBounds | null> {
-  const monitors = await availableMonitors();
-  if (monitors.length === 0) return null;
-
-  const scale = await getCurrentWindow().scaleFactor();
+): LogicalClampBounds {
+  const scale = m.scaleFactor;
+  const { minPhysX, minPhysY, maxPhysX, maxPhysY } = workAreaGlobalPhysical(m);
   const physW = winLogicalW * scale;
   const physH = winLogicalH * scale;
-
-  let minPhysX = Infinity;
-  let minPhysY = Infinity;
-  let maxPhysX = -Infinity;
-  let maxPhysY = -Infinity;
-  for (const m of monitors) {
-    const wa = m.workArea;
-    minPhysX = Math.min(minPhysX, wa.position.x);
-    minPhysY = Math.min(minPhysY, wa.position.y);
-    maxPhysX = Math.max(maxPhysX, wa.position.x + wa.size.width);
-    maxPhysY = Math.max(maxPhysY, wa.position.y + wa.size.height);
-  }
-
   return {
     minX: minPhysX / scale,
     minY: minPhysY / scale,
     maxX: (maxPhysX - physW) / scale,
     maxY: (maxPhysY - physH) / scale,
   };
+}
+
+/** Logical outer size of the current window (matches setPosition / outerPosition space). */
+export async function getWindowLogicalOuterSize(): Promise<{ w: number; h: number }> {
+  const win = getCurrentWindow();
+  const [outerSize, scale] = await Promise.all([win.outerSize(), win.scaleFactor()]);
+  return {
+    w: outerSize.width / scale,
+    h: outerSize.height / scale,
+  };
+}
+
+/**
+ * Clamp bounds for the monitor the window is on (preferred), or union of all monitors.
+ * Uses each monitor's scaleFactor and global work-area coordinates.
+ */
+export async function getLogicalClampBounds(
+  winLogicalW: number,
+  winLogicalH: number,
+): Promise<LogicalClampBounds | null> {
+  const focused = await currentMonitor();
+  if (focused) {
+    return boundsFromMonitor(focused, winLogicalW, winLogicalH);
+  }
+
+  const monitors = await availableMonitors();
+  if (monitors.length === 0) return null;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const m of monitors) {
+    const b = boundsFromMonitor(m, winLogicalW, winLogicalH);
+    minX = Math.min(minX, b.minX);
+    minY = Math.min(minY, b.minY);
+    maxX = Math.max(maxX, b.maxX);
+    maxY = Math.max(maxY, b.maxY);
+  }
+
+  return { minX, minY, maxX, maxY };
+}
+
+/** Bounds using the window's actual outer logical size. */
+export async function getLogicalClampBoundsForWindow(): Promise<LogicalClampBounds | null> {
+  const { w, h } = await getWindowLogicalOuterSize();
+  return getLogicalClampBounds(w, h);
 }
 
 export function clampToLogicalBounds(

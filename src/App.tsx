@@ -20,7 +20,7 @@ import { petError, petLog, petWarn } from "./lib/petDebug";
 import {
   applyWindowPosition,
   clampToLogicalBounds,
-  getLogicalClampBounds,
+  getLogicalClampBoundsForWindow,
   persistCurrentWindowPosition,
   readStoredWindowPosition,
   type LogicalClampBounds,
@@ -429,7 +429,7 @@ export default function App() {
         [outer, scaleFactor, bounds] = await Promise.all([
           win.outerPosition(),
           win.scaleFactor(),
-          getLogicalClampBounds(w, h),
+          getLogicalClampBoundsForWindow(),
         ]);
       } catch (err) {
         petWarn("auto patrol: failed to read window state", {
@@ -546,15 +546,14 @@ export default function App() {
         }
 
         x += dir * speed * dt;
+        x = clampToLogicalBounds(x, y, bounds).x;
 
         if (x <= minX) {
-          x = minX;
           if (dir < 0) {
             dir = 1;
             setRunDirection(dir);
           }
         } else if (x >= maxX) {
-          x = maxX;
           if (dir > 0) {
             dir = -1;
             setRunDirection(dir);
@@ -980,11 +979,10 @@ export default function App() {
         try {
           if (isTauri()) {
             const appWindow = getCurrentWindow();
-            const { w, h } = windowLogicalSizeRef.current;
             const [outer, scaleFactor, clampBounds] = await Promise.all([
               appWindow.outerPosition(),
               appWindow.scaleFactor(),
-              getLogicalClampBounds(w, h),
+              getLogicalClampBoundsForWindow(),
             ]);
             const logical = outer.toLogical(scaleFactor);
             if (generation !== gestureGenerationRef.current) return;
